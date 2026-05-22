@@ -1,0 +1,537 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>7TV Chat Overlay</title>
+<style>
+  /* ============================================================
+     7TV CHAT OVERLAY — OBS Browser Source
+     Use: ?channel=SEU_CANAL  (ex: ?channel=asrus)
+     Optional flags:
+       &fade=30          (seconds before a message fades, default 30)
+       &max=50           (max messages on screen, default 50)
+       &size=20          (font-size px, default 20)
+       &align=bottom     (bottom|top, default bottom)
+     ============================================================ */
+
+  :root {
+    --font: 'Inter Tight', system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    --size: 20px;
+    --line: 1.45;
+    --shadow: 0 0 4px rgba(0,0,0,.95), 0 0 2px rgba(0,0,0,.95), 1px 1px 0 rgba(0,0,0,.7);
+  }
+
+  @import url('https://fonts.googleapis.com/css2?family=Inter+Tight:wght@500;700&display=swap');
+
+  html, body {
+    margin: 0; padding: 0;
+    width: 100vw; height: 100vh;
+    background: transparent;
+    overflow: hidden;
+    font-family: var(--font);
+    font-size: var(--size);
+    line-height: var(--line);
+    color: #fff;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  #chat {
+    position: absolute;
+    inset: 0;
+    padding: 12px 16px;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    gap: 4px;
+    overflow: hidden;
+  }
+  #chat.top { justify-content: flex-start; }
+
+  .msg {
+    text-shadow: var(--shadow);
+    word-wrap: break-word;
+    animation: in .25s ease-out;
+    transition: opacity .8s ease;
+    font-weight: 500;
+  }
+  .msg.fade { opacity: 0; }
+
+  @keyframes in {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .nick {
+    font-weight: 700;
+    /* fallback color set inline per-message */
+  }
+  .nick::after { content: ':'; color: #fff; -webkit-text-fill-color: #fff; }
+
+  .badges {
+    display: inline-flex;
+    gap: 3px;
+    margin-right: 4px;
+    vertical-align: middle;
+  }
+  .badges img { height: 1em; width: 1em; vertical-align: middle; }
+
+  .emote {
+    height: 1.7em;
+    vertical-align: middle;
+    margin: -0.3em 0;
+  }
+
+  /* ============================================================
+     7TV PAINT SUPPORT
+     Paints são aplicados via CSS variables + background-clip:text.
+     Suporta: linear-gradient, radial-gradient, image (animado),
+     drop-shadow stack pra glow/outline.
+     ============================================================ */
+  .paint {
+    background-color: currentColor;
+    background-image: var(--paint-bg, none);
+    background-size: cover;
+    background-clip: text;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+    filter: var(--paint-shadow, none);
+  }
+</style>
+</head>
+<body>
+
+<div id="chat"></div>
+
+<!-- tmi.js: cliente IRC Twitch -->
+<script src="https://unpkg.com/tmi.js@1.8.5/dist/tmi.min.js"></script>
+
+<script>
+'use strict';
+
+/* ---------- 1. Config via querystring ---------- */
+const params  = new URLSearchParams(location.search);
+const CHANNEL = (params.get('channel') || '').toLowerCase().trim();
+const FADE_S  = parseInt(params.get('fade') || '30', 10);
+const MAX_MSG = parseInt(params.get('max')  || '50', 10);
+const SIZE    = params.get('size');
+const ALIGN   = params.get('align') || 'bottom';
+
+if (SIZE)            document.documentElement.style.setProperty('--size', SIZE + 'px');
+if (ALIGN === 'top') document.getElementById('chat').classList.add('top');
+
+if (!CHANNEL) {
+  document.getElementById('chat').innerHTML =
+    '<div class="msg" style="color:#ff5">⚠ Add <code>?channel=YOUR_TWITCH_NAME</code> to the URL.</div>';
+  throw new Error('No channel');
+}
+
+/* ---------- 2. Emote + Paint caches ---------- */
+const emoteMap   = new Map();   // code -> {url, zeroWidth}
+const paintCache = new Map();   // twitchId -> {paint, color} | null
+let   roomId     = null;
+
+/* ---------- 3. Load emotes from 7TV / BTTV / FFZ ---------- */
+async function loadGlobalEmotes() {
+  // 7TV global
+  try {
+    const r = await fetch('https://7tv.io/v3/emote-sets/global');
+    const d = await r.json();
+    for (const e of (d.emotes || [])) add7tv(e);
+  } catch (e) { console.warn('7tv global', e); }
+
+  // BTTV global
+  try {
+    const r = await fetch('https://api.betterttv.net/3/cached/emotes/global');
+    const d = await r.json();
+    for (const e of d) emoteMap.set(e.code, {
+      url: `https://cdn.betterttv.net/emote/${e.id}/2x.webp`,
+    });
+  } catch (e) { console.warn('bttv global', e); }
+
+  // FFZ global
+  try {
+    const r = await fetch('https://api.frankerfacez.com/v1/set/global');
+    const d = await r.json();
+    for (const sid of d.default_sets) {
+      for (const e of d.sets[sid].emoticons) {
+        const u = e.urls['2'] || e.urls['1'];
+        emoteMap.set(e.name, { url: u.startsWith('//') ? 'https:' + u : u });
+      }
+    }
+  } catch (e) { console.warn('ffz global', e); }
+}
+
+async function loadChannelEmotes(twitchId) {
+  // 7TV channel
+  try {
+    const r = await fetch(`https://7tv.io/v3/users/twitch/${twitchId}`);
+    const d = await r.json();
+    for (const e of (d.emote_set?.emotes || [])) add7tv(e);
+  } catch (e) { console.warn('7tv channel', e); }
+
+  // BTTV channel
+  try {
+    const r = await fetch(`https://api.betterttv.net/3/cached/users/twitch/${twitchId}`);
+    const d = await r.json();
+    for (const e of [...(d.channelEmotes || []), ...(d.sharedEmotes || [])]) {
+      emoteMap.set(e.code, { url: `https://cdn.betterttv.net/emote/${e.id}/2x.webp` });
+    }
+  } catch (e) { console.warn('bttv channel', e); }
+
+  // FFZ channel
+  try {
+    const r = await fetch(`https://api.frankerfacez.com/v1/room/id/${twitchId}`);
+    const d = await r.json();
+    for (const sid in d.sets) {
+      for (const e of d.sets[sid].emoticons) {
+        const u = e.urls['2'] || e.urls['1'];
+        emoteMap.set(e.name, { url: u.startsWith('//') ? 'https:' + u : u });
+      }
+    }
+  } catch (e) { console.warn('ffz channel', e); }
+}
+
+function add7tv(e) {
+  const host = e.data?.host;
+  if (!host) return;
+  // Prefer 2x animated webp
+  const file = (host.files || []).find(f => f.name === '2x.webp') || host.files[0];
+  if (!file) return;
+  emoteMap.set(e.name, {
+    url: `https:${host.url}/${file.name}`,
+    zeroWidth: (e.data.flags & 1) === 1, // 7TV zero-width flag
+  });
+}
+
+/* ---------- 4. 7TV cosmetics (paint) per user ---------- */
+async function getPaint(twitchId) {
+  if (paintCache.has(twitchId)) return paintCache.get(twitchId);
+
+  // Reserve immediately so concurrent messages from same user don't double-fetch
+  const p = (async () => {
+    try {
+      const r = await fetch(`https://7tv.io/v3/users/twitch/${twitchId}`);
+      if (!r.ok) return null;
+      const d = await r.json();
+      const style = d.user?.style;
+      if (!style) return null;
+
+      // Resolve paint object if only ID is given
+      let paint = style.paint || null;
+      if (!paint && style.paint_id) {
+        try {
+          const pr = await fetch(`https://7tv.io/v3/cosmetics?user_identifier=twitch_id`);
+          // (fallback unused — most responses already inline `style.paint`)
+        } catch {}
+      }
+      return { paint, color: style.color || null, userId: d.user?.id || null };
+    } catch {
+      return null;
+    }
+  })();
+
+  paintCache.set(twitchId, p);
+  // Replace promise with resolved value to keep cache clean
+  const resolved = await p;
+  paintCache.set(twitchId, resolved);
+
+  // Subscribe to live cosmetic updates for this user (7TV EventAPI)
+  if (resolved?.userId) subscribeUser(resolved.userId, twitchId);
+
+  return resolved;
+}
+
+/* ---------- 5. Build CSS for a 7TV paint ---------- */
+function paintToCSS(paint) {
+  if (!paint) return null;
+
+  // paint.function: LINEAR_GRADIENT | RADIAL_GRADIENT | URL
+  // paint.stops: [{at:0..1, color: int (0xRRGGBBAA)}]
+  // paint.shadows: [{x_offset, y_offset, radius, color}]
+  // paint.angle, paint.repeat, paint.shape, paint.image_url
+
+  const int2rgba = n => {
+    if (n == null) return 'rgba(255,255,255,1)';
+    // 7TV color int = 0xRRGGBBAA
+    const r = (n >>> 24) & 0xff;
+    const g = (n >>> 16) & 0xff;
+    const b = (n >>> 8)  & 0xff;
+    const a = (n & 0xff) / 255;
+    return `rgba(${r},${g},${b},${a})`;
+  };
+
+  let bg = null;
+  const stops = (paint.stops || [])
+    .map(s => `${int2rgba(s.color)} ${(s.at * 100).toFixed(2)}%`)
+    .join(', ');
+
+  switch (paint.function) {
+    case 'LINEAR_GRADIENT':
+      bg = `linear-gradient(${paint.angle ?? 0}deg, ${stops})`;
+      break;
+    case 'RADIAL_GRADIENT':
+      bg = `radial-gradient(${paint.shape || 'circle'}, ${stops})`;
+      break;
+    case 'URL':
+      if (paint.image_url) bg = `url("${paint.image_url}")`;
+      break;
+  }
+
+  // Build drop-shadow filter chain (paint shadows = glow/outline on text)
+  let filter = null;
+  if (Array.isArray(paint.shadows) && paint.shadows.length) {
+    filter = paint.shadows.map(s =>
+      `drop-shadow(${s.x_offset || 0}px ${s.y_offset || 0}px ${s.radius || 0}px ${int2rgba(s.color)})`
+    ).join(' ');
+  }
+
+  return { bg, filter };
+}
+
+/* ---------- 6. Render helpers ---------- */
+const chatEl = document.getElementById('chat');
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+}
+
+function buildBadges(badges) {
+  if (!badges) return '';
+  // tmi.js gives badge names like { broadcaster:'1', subscriber:'12', moderator:'1' }
+  // We only show simple text indicators since rendering global badges needs Helix auth.
+  const map = { broadcaster: '🎙', moderator: '🛡', vip: '💎', subscriber: '★', founder: '✦', staff: '⚙' };
+  const out = [];
+  for (const k in badges) if (map[k]) out.push(map[k]);
+  return out.length ? `<span class="badges">${out.join('')}</span>` : '';
+}
+
+function emotesInMessage(text, tmiEmotes) {
+  // tmi.js gives Twitch native emotes; we render those first, then BTTV/FFZ/7TV by word.
+  const positions = []; // {start,end, html}
+  if (tmiEmotes) {
+    for (const id in tmiEmotes) {
+      for (const range of tmiEmotes[id]) {
+        const [a, b] = range.split('-').map(Number);
+        positions.push({
+          start: a, end: b + 1,
+          html: `<img class="emote" src="https://static-cdn.jtvnw.net/emoticons/v2/${id}/default/dark/2.0" alt="">`
+        });
+      }
+    }
+  }
+  positions.sort((a, b) => a.start - b.start);
+
+  // Slice text around native emotes
+  let out = '';
+  let cursor = 0;
+  for (const p of positions) {
+    out += renderWords(text.slice(cursor, p.start));
+    out += p.html;
+    cursor = p.end;
+  }
+  out += renderWords(text.slice(cursor));
+  return out;
+}
+
+function renderWords(chunk) {
+  if (!chunk) return '';
+  return chunk.split(/(\s+)/).map(tok => {
+    if (/^\s+$/.test(tok)) return tok;
+    const em = emoteMap.get(tok);
+    if (em) {
+      const zw = em.zeroWidth ? ' style="margin-left:-1.7em"' : '';
+      return `<img class="emote" src="${em.url}" alt="${escapeHtml(tok)}"${zw}>`;
+    }
+    return escapeHtml(tok);
+  }).join('');
+}
+
+function addMessage({ user, color, badges, text, tmiEmotes, twitchId }) {
+  const div = document.createElement('div');
+  div.className = 'msg';
+
+  // Default nick color = Twitch color tag or random pastel based on name
+  const fallback = color || stringColor(user);
+  div.innerHTML =
+    buildBadges(badges) +
+    `<span class="nick" data-uid="${twitchId}" style="color:${fallback}">${escapeHtml(user)}</span> ` +
+    emotesInMessage(text, tmiEmotes);
+
+  chatEl.appendChild(div);
+
+  // Trim
+  while (chatEl.children.length > MAX_MSG) chatEl.firstChild.remove();
+
+  // Fade & remove
+  if (FADE_S > 0) {
+    setTimeout(() => { div.classList.add('fade'); }, FADE_S * 1000);
+    setTimeout(() => { div.remove(); }, (FADE_S + 1) * 1000);
+  }
+
+  // Async-apply 7TV paint (don't block render)
+  if (twitchId) applyPaint(div.querySelector('.nick'), twitchId);
+}
+
+async function applyPaint(nickEl, twitchId) {
+  const data = await getPaint(twitchId);
+  if (!data || !nickEl.isConnected) return;
+
+  // Solid color override from 7TV (used when there's no paint)
+  if (!data.paint && data.color != null) {
+    nickEl.style.color = int2rgbaSolid(data.color);
+    return;
+  }
+
+  const css = paintToCSS(data.paint);
+  if (!css || !css.bg) return;
+
+  nickEl.classList.add('paint');
+  nickEl.style.setProperty('--paint-bg', css.bg);
+  if (css.filter) nickEl.style.setProperty('--paint-shadow', css.filter);
+}
+
+function int2rgbaSolid(n) {
+  const r = (n >>> 24) & 0xff;
+  const g = (n >>> 16) & 0xff;
+  const b = (n >>> 8)  & 0xff;
+  return `rgb(${r},${g},${b})`;
+}
+
+function stringColor(s) {
+  // Soft fallback: hash to a pastel-ish hue
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return `hsl(${h % 360}, 70%, 65%)`;
+}
+
+/* ---------- 7. 7TV EventAPI (live cosmetic updates) ---------- */
+// Docs: https://github.com/SevenTV/EventAPI
+// We subscribe to `user.update` per 7TV user-id so we know when the paint changes.
+const EVENT_URL    = 'wss://events.7tv.io/v3';
+const subscribed   = new Set();   // 7TV user ids we're already listening to
+const userIdByTw   = new Map();   // twitch_id -> 7tv id
+let   ws           = null;
+let   wsOpen       = false;
+let   wsBackoff    = 1000;
+const pendingSubs  = [];
+
+function connectEvents() {
+  ws = new WebSocket(EVENT_URL);
+
+  ws.addEventListener('open', () => {
+    wsOpen    = true;
+    wsBackoff = 1000;
+    // Re-subscribe everything (handles reconnect)
+    const all = [...subscribed];
+    subscribed.clear();
+    all.forEach(id => sendSub(id));
+    // Drain anything queued before open
+    while (pendingSubs.length) sendSub(pendingSubs.shift());
+  });
+
+  ws.addEventListener('message', ev => {
+    let m; try { m = JSON.parse(ev.data); } catch { return; }
+    // op 0 = DISPATCH
+    if (m.op !== 0 || !m.d) return;
+    if (m.d.type !== 'user.update' && m.d.type !== 'cosmetic.create') return;
+
+    // Find which twitch_id this update belongs to
+    const targetId = m.d.body?.id || m.d.body?.object?.id;
+    if (!targetId) return;
+
+    let twId = null;
+    for (const [k, v] of userIdByTw) if (v === targetId) { twId = k; break; }
+    if (!twId) return;
+
+    // Invalidate cache and refetch so next message renders the new paint
+    paintCache.delete(twId);
+    getPaint(twId).then(() => {
+      // Repaint already-rendered nicks from this user
+      document.querySelectorAll(`.nick[data-uid="${twId}"]`).forEach(el => {
+        el.classList.remove('paint');
+        el.style.removeProperty('--paint-bg');
+        el.style.removeProperty('--paint-shadow');
+        applyPaint(el, twId);
+      });
+    });
+  });
+
+  ws.addEventListener('close', () => {
+    wsOpen = false;
+    // Exponential backoff up to 30s
+    setTimeout(connectEvents, wsBackoff);
+    wsBackoff = Math.min(wsBackoff * 2, 30000);
+  });
+
+  ws.addEventListener('error', () => { try { ws.close(); } catch {} });
+}
+
+function sendSub(sevenTvId) {
+  if (subscribed.has(sevenTvId)) return;
+  if (!wsOpen) { pendingSubs.push(sevenTvId); return; }
+  subscribed.add(sevenTvId);
+  ws.send(JSON.stringify({
+    op: 35, // SUBSCRIBE
+    d: { type: 'user.update', condition: { object_id: sevenTvId } }
+  }));
+}
+
+function subscribeUser(sevenTvId, twitchId) {
+  userIdByTw.set(twitchId, sevenTvId);
+  sendSub(sevenTvId);
+}
+
+connectEvents();
+
+/* ---------- 8. Bootstrap ---------- */
+(async function init() {
+  await loadGlobalEmotes();
+
+  // Resolve channel -> twitch id via decapi (no auth needed)
+  try {
+    const r = await fetch(`https://decapi.me/twitch/id/${CHANNEL}`);
+    const t = (await r.text()).trim();
+    if (/^\d+$/.test(t)) {
+      roomId = t;
+      await loadChannelEmotes(roomId);
+    }
+  } catch (e) { console.warn('id lookup', e); }
+
+  const client = new tmi.Client({
+    options: { skipUpdatingEmotesets: true },
+    connection: { reconnect: true, secure: true },
+    channels: [CHANNEL],
+  });
+
+  client.on('message', (channel, tags, message, self) => {
+    // Use room-id from tags if we didn't have it yet
+    if (!roomId && tags['room-id']) {
+      roomId = tags['room-id'];
+      loadChannelEmotes(roomId);
+    }
+    addMessage({
+      user: tags['display-name'] || tags.username,
+      color: tags.color,
+      badges: tags.badges,
+      text: message,
+      tmiEmotes: tags.emotes,
+      twitchId: tags['user-id'],
+    });
+  });
+
+  client.on('messagedeleted', (_c, _u, _msg, tags) => {
+    const id = tags['target-msg-id'];
+    if (!id) return;
+    // (tmi.js doesn't tag DOM nodes with msg id by default — skipped for simplicity)
+  });
+
+  client.on('clearchat', () => { chatEl.innerHTML = ''; });
+
+  client.connect().catch(err => console.error('tmi connect', err));
+})();
+</script>
+</body>
+</html>
