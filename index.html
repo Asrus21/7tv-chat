@@ -103,18 +103,8 @@
 
 <div id="chat"></div>
 
-<!-- tmi.js: cliente IRC Twitch (com fallback caso o CDN principal falhe) -->
+<!-- tmi.js: cliente IRC Twitch -->
 <script src="https://cdn.jsdelivr.net/npm/tmi.js@1.8.5/dist/tmi.min.js"></script>
-<script>
-  if (typeof tmi === 'undefined') {
-    document.write('<script src="https://unpkg.com/tmi.js@1.8.5/dist/tmi.min.js"><\/script>');
-  }
-</script>
-<script>
-  if (typeof tmi === 'undefined') {
-    document.write('<script src="https://cdn.skypack.dev/tmi.js@1.8.5"><\/script>');
-  }
-</script>
 
 <script>
 'use strict';
@@ -497,8 +487,36 @@ function subscribeUser(sevenTvId, twitchId) {
 connectEvents();
 
 /* ---------- 8. Bootstrap ---------- */
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error('Failed: ' + src));
+    document.head.appendChild(s);
+  });
+}
+
+async function ensureTmi() {
+  if (typeof tmi !== 'undefined') return true;
+  const fallbacks = [
+    'https://unpkg.com/tmi.js@1.8.5/dist/tmi.min.js',
+    'https://cdnjs.cloudflare.com/ajax/libs/tmi.js/1.8.5/tmi.min.js',
+  ];
+  for (const url of fallbacks) {
+    try {
+      await loadScript(url);
+      if (typeof tmi !== 'undefined') return true;
+    } catch (e) {
+      console.warn('CDN failed:', url);
+    }
+  }
+  return false;
+}
+
 (async function init() {
-  if (typeof tmi === 'undefined') {
+  const ok = await ensureTmi();
+  if (!ok) {
     document.getElementById('chat').innerHTML =
       '<div class="msg" style="color:#f55">⚠ tmi.js failed to load from all CDNs. Check network/adblock.</div>';
     return;
