@@ -14,14 +14,14 @@
        &align=bottom     (bottom|top, default bottom)
      ============================================================ */
 
+  @import url('https://fonts.googleapis.com/css2?family=Inter+Tight:wght@500;700&display=swap');
+
   :root {
     --font: 'Inter Tight', system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
     --size: 20px;
     --line: 1.45;
     --shadow: 0 0 4px rgba(0,0,0,.95), 0 0 2px rgba(0,0,0,.95), 1px 1px 0 rgba(0,0,0,.7);
   }
-
-  @import url('https://fonts.googleapis.com/css2?family=Inter+Tight:wght@500;700&display=swap');
 
   html, body {
     margin: 0; padding: 0;
@@ -103,8 +103,18 @@
 
 <div id="chat"></div>
 
-<!-- tmi.js: cliente IRC Twitch -->
-<script src="https://unpkg.com/tmi.js@1.8.5/dist/tmi.min.js"></script>
+<!-- tmi.js: cliente IRC Twitch (com fallback caso o CDN principal falhe) -->
+<script src="https://cdn.jsdelivr.net/npm/tmi.js@1.8.5/dist/tmi.min.js"></script>
+<script>
+  if (typeof tmi === 'undefined') {
+    document.write('<script src="https://unpkg.com/tmi.js@1.8.5/dist/tmi.min.js"><\/script>');
+  }
+</script>
+<script>
+  if (typeof tmi === 'undefined') {
+    document.write('<script src="https://cdn.skypack.dev/tmi.js@1.8.5"><\/script>');
+  }
+</script>
 
 <script>
 'use strict';
@@ -488,6 +498,12 @@ connectEvents();
 
 /* ---------- 8. Bootstrap ---------- */
 (async function init() {
+  if (typeof tmi === 'undefined') {
+    document.getElementById('chat').innerHTML =
+      '<div class="msg" style="color:#f55">⚠ tmi.js failed to load from all CDNs. Check network/adblock.</div>';
+    return;
+  }
+
   await loadGlobalEmotes();
 
   // Resolve channel -> twitch id via decapi (no auth needed)
