@@ -371,6 +371,7 @@ function paintToCSS(paint) {
   const imageUrl = paint.image_url || paint.imageUrl || paint.url || null;
   const stops    = paint.stops || paint.color_stops || [];
   const shadows  = paint.shadows || paint.drop_shadows || [];
+  const repeat   = paint.repeat === true;
 
   // 7TV color int = signed 32-bit 0xRRGGBBAA
   const int2rgba = n => {
@@ -383,23 +384,24 @@ function paintToCSS(paint) {
     return `rgba(${r},${g},${b},${a})`;
   };
 
-  // Stops are distributed evenly across 0..100% by index (this is how the
-  // 7TV web extension renders them — the `at` field is ignored in practice).
+  // Use the real `at` field from each stop (this is the position 0..1)
   let stopsCSS = '';
   if (stops.length === 1) {
     const c = int2rgba(stops[0].color);
     stopsCSS = `${c} 0%, ${c} 100%`;
   } else if (stops.length > 1) {
-    stopsCSS = stops.map((s, i) =>
-      `${int2rgba(s.color)} ${(100 / (stops.length - 1) * i).toFixed(2)}%`
+    stopsCSS = stops.map(s =>
+      `${int2rgba(s.color)} ${((s.at ?? 0) * 100).toFixed(2)}%`
     ).join(', ');
   }
 
   let bg = null;
   if ((fn.includes('LINEAR') || (!fn && stops.length)) && stopsCSS) {
-    bg = `linear-gradient(${angle}deg, ${stopsCSS})`;
+    const fnName = repeat ? 'repeating-linear-gradient' : 'linear-gradient';
+    bg = `${fnName}(${angle}deg, ${stopsCSS})`;
   } else if (fn.includes('RADIAL') && stopsCSS) {
-    bg = `radial-gradient(${shape}, ${stopsCSS})`;
+    const fnName = repeat ? 'repeating-radial-gradient' : 'radial-gradient';
+    bg = `${fnName}(${shape}, ${stopsCSS})`;
   } else if ((fn.includes('URL') || fn.includes('IMAGE')) && imageUrl) {
     bg = `url("${imageUrl}")`;
   }
