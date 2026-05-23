@@ -368,7 +368,9 @@ function paintToCSS(paint) {
   const fn       = String(paint.function || paint.type || '').toUpperCase();
   const angle    = paint.angle ?? 0;
   const shape    = paint.shape || 'circle';
-  const imageUrl = paint.image_url || paint.imageUrl || paint.url || null;
+  // Upgrade 1x.webp → 4x.webp for high-res animated paints
+  let imageUrl   = paint.image_url || paint.imageUrl || paint.url || null;
+  if (imageUrl) imageUrl = imageUrl.replace(/\/1x\.webp$/, '/4x.webp');
   const stops    = paint.stops || paint.color_stops || [];
   const shadows  = paint.shadows || paint.drop_shadows || [];
   const repeat   = paint.repeat === true;
@@ -560,12 +562,19 @@ async function applyPaint(nickEl, twitchId) {
   // Calculate proper background-size after element renders
   requestAnimationFrame(() => {
     if (!nickEl.isConnected) return;
-    const w = nickEl.offsetWidth;
-    const h = nickEl.offsetHeight;
-    // For gradients: 100% 100% is fine. For images: use element size.
-    nickEl.style.backgroundSize = (css.bg.includes('url') ? `${w}px ${h}px` : '100% 100%');
-    nickEl.style.backgroundRepeat = 'no-repeat';
-    nickEl.style.backgroundPosition = '0 0';
+    const isUrl = css.bg.includes('url(');
+    if (isUrl) {
+      // For animated webp paints: let the image keep its natural size and tile/center it
+      // This is how the 7TV extension renders animated paints
+      nickEl.style.backgroundSize = 'auto';
+      nickEl.style.backgroundRepeat = 'repeat';
+      nickEl.style.backgroundPosition = 'center';
+    } else {
+      // For gradients: stretch to fill the nick exactly
+      nickEl.style.backgroundSize = '100% 100%';
+      nickEl.style.backgroundRepeat = 'no-repeat';
+      nickEl.style.backgroundPosition = '0 0';
+    }
   });
 }
 
