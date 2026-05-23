@@ -573,9 +573,11 @@ async function applyPaint(nickEl, twitchId) {
     if (!nickEl.isConnected) return;
     const isUrl = css.bg.includes('url(');
     if (isUrl) {
-      // For animated webp paints: let the image keep its natural size and tile/center it
-      nickEl.style.backgroundSize = 'auto';
-      nickEl.style.backgroundRepeat = 'repeat';
+      // For animated webp paints: stretch the texture across the nick width,
+      // height auto preserves the aspect ratio so the animation flows naturally.
+      // This is how 7TV's official extension and Chatterino7 render them.
+      nickEl.style.backgroundSize = 'cover';
+      nickEl.style.backgroundRepeat = 'no-repeat';
       nickEl.style.backgroundPosition = 'center';
     } else {
       // For gradients: stretch to fill the nick exactly
