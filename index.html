@@ -45,6 +45,7 @@
     gap: 4px;
     overflow: hidden;
   }
+  /* align=top: anchor messages at the top of the screen, but new ones still arrive at the bottom of the visible stack */
   #chat.top { justify-content: flex-start; }
 
   .msg {
@@ -216,18 +217,37 @@ function parseBadgeResponse(data) {
 }
 
 async function loadBadges(twitchId) {
-  // Global badges
-  try {
-    const r = await fetch('https://api.ivr.fi/v2/twitch/badges');
-    parseBadgeResponse(await r.json());
-  } catch (e) { console.warn('badges global', e); }
-
-  // Channel-specific badges (subscriber tiers, bits, etc)
-  if (twitchId) {
+  // Global badges — try ivr.fi (v3 first, then v2)
+  const globalUrls = [
+    'https://api.ivr.fi/v3/twitch/badges',
+    'https://api.ivr.fi/v2/twitch/badges',
+  ];
+  for (const url of globalUrls) {
     try {
-      const r = await fetch(`https://api.ivr.fi/v2/twitch/badges/${twitchId}`);
-      parseBadgeResponse(await r.json());
-    } catch (e) { console.warn('badges channel', e); }
+      const r = await fetch(url);
+      if (!r.ok) { console.warn('badges global', url, r.status); continue; }
+      const data = await r.json();
+      const before = badgeMap.size;
+      parseBadgeResponse(data);
+      if (badgeMap.size > before) break; // got some, stop trying
+      console.warn('badges global parsed 0 from', url, 'sample:', data);
+    } catch (e) { console.warn('badges global', url, e); }
+  }
+
+  // Channel-specific badges
+  if (twitchId) {
+    const chanUrls = [
+      `https://api.ivr.fi/v3/twitch/badges/${twitchId}`,
+      `https://api.ivr.fi/v2/twitch/badges/${twitchId}`,
+    ];
+    for (const url of chanUrls) {
+      try {
+        const r = await fetch(url);
+        if (!r.ok) { console.warn('badges channel', url, r.status); continue; }
+        parseBadgeResponse(await r.json());
+        break;
+      } catch (e) { console.warn('badges channel', url, e); }
+    }
   }
 
   console.log('[badges] loaded', badgeMap.size, 'badge versions');
@@ -474,10 +494,18 @@ function addMessage({ user, color, badges, text, tmiEmotes, twitchId }) {
     `<span class="nick" data-uid="${twitchId}" style="color:${fallback}">${escapeHtml(user)}</span> ` +
     emotesInMessage(text, tmiEmotes);
 
-  chatEl.appendChild(div);
+  // Insert at top for align=top, otherwise append at bottom
+  if (ALIGN === 'top') {
+    chatEl.insertBefore(div, chatEl.firstChild);
+  } else {
+    chatEl.appendChild(div);
+  }
 
-  // Trim
-  while (chatEl.children.length > MAX_MSG) chatEl.firstChild.remove();
+  // Trim oldest messages (from the opposite end of insertion)
+  while (chatEl.children.length > MAX_MSG) {
+    if (ALIGN === 'top') chatEl.lastChild.remove();
+    else chatEl.firstChild.remove();
+  }
 
   // Fade & remove
   if (FADE_S > 0) {
@@ -502,6 +530,9 @@ async function applyPaint(nickEl, twitchId) {
   const css = paintToCSS(data.paint);
   if (!css || !css.bg) return;
 
+  // Inline color="..." set in addMessage() would beat the .paint class via specificity.
+  // Clear it so background-clip:text can render.
+  nickEl.style.removeProperty('color');
   nickEl.classList.add('paint');
   nickEl.style.setProperty('--paint-bg', css.bg);
   if (css.filter) nickEl.style.setProperty('--paint-shadow', css.filter);
@@ -563,14 +594,20 @@ function connectEvents() {
     for (const [k, v] of userIdByTw) if (v === targetId) { twId = k; break; }
     if (!twId) return;
 
+    console.log('[EventAPI]', m.d.type, 'for', twId, '(7tv id', targetId, ')');
+
     // Invalidate cache and refetch so next message renders the new paint
     paintCache.delete(twId);
     getPaint(twId).then(() => {
       // Repaint already-rendered nicks from this user
-      document.querySelectorAll(`.nick[data-uid="${twId}"]`).forEach(el => {
+      const nicks = document.querySelectorAll(`.nick[data-uid="${twId}"]`);
+      console.log('[EventAPI] repainting', nicks.length, 'nicks for', twId);
+      nicks.forEach(el => {
         el.classList.remove('paint');
         el.style.removeProperty('--paint-bg');
         el.style.removeProperty('--paint-shadow');
+        el.style.removeProperty('color');
+        el.style.removeProperty('-webkit-text-fill-color');
         applyPaint(el, twId);
       });
     });
