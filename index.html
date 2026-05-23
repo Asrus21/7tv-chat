@@ -87,27 +87,12 @@
     margin: -0.3em 0;
   }
 
-  /* ============================================================
-     7TV PAINT SUPPORT
-     Paints são aplicados via CSS variables + background-clip:text.
-     Suporta: linear-gradient, radial-gradient, image (animado),
-     drop-shadow stack pra glow/outline.
-     ============================================================ */
   .paint {
-    display: inline-block;
-    background-image: var(--paint-bg, none);
-    background-size: 100% 100%;
-    background-repeat: no-repeat;
-    background-clip: text;
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    color: transparent;
-    filter: var(--paint-shadow, none);
+    /* Will be set dynamically in applyPaint() */
   }
-  /* Make sure ::after (the colon) doesn't inherit the transparent fill */
-  .nick.paint::after {
-    -webkit-text-fill-color: #fff;
+  .paint::after {
     color: #fff;
+    -webkit-text-fill-color: #fff;
   }
 </style>
 </head>
