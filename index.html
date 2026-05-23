@@ -540,12 +540,31 @@ async function applyPaint(nickEl, twitchId) {
     return;
   }
 
-  // Inline color="..." set in addMessage() would beat the .paint class via specificity.
-  // Clear it so background-clip:text can render.
-  nickEl.style.removeProperty('color');
   nickEl.classList.add('paint');
-  nickEl.style.setProperty('--paint-bg', css.bg);
-  if (css.filter) nickEl.style.setProperty('--paint-shadow', css.filter);
+
+  // CRITICAL: background-clip:text requires explicit dimensions
+  // Must be display:inline-block or block, not inline
+  nickEl.style.display = 'inline-block';
+  nickEl.style.whiteSpace = 'nowrap';
+
+  // Apply background-clip:text styles
+  nickEl.style.backgroundImage = css.bg;
+  nickEl.style.backgroundClip = 'text';
+  nickEl.style.webkitBackgroundClip = 'text';
+  nickEl.style.webkitTextFillColor = 'transparent';
+  nickEl.style.color = 'transparent';
+  if (css.filter) nickEl.style.filter = css.filter;
+
+  // Calculate proper background-size after element renders
+  requestAnimationFrame(() => {
+    if (!nickEl.isConnected) return;
+    const w = nickEl.offsetWidth;
+    const h = nickEl.offsetHeight;
+    // For gradients: 100% 100% is fine. For images: use element size.
+    nickEl.style.backgroundSize = (css.bg.includes('url') ? `${w}px ${h}px` : '100% 100%');
+    nickEl.style.backgroundRepeat = 'no-repeat';
+    nickEl.style.backgroundPosition = '0 0';
+  });
 }
 
 function int2rgbaSolid(n) {
