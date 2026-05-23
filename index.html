@@ -133,52 +133,104 @@ if (!CHANNEL) {
 
 /* ---------- 2. Emote + Paint caches ---------- */
 const emoteMap   = new Map();   // code -> {url, zeroWidth}
-const paintCache = new Map();   // twitchId -> {paint, color} | null
+const paintCache = new Map();   // twitchId -> {paint, color, userId} | null
 const paintById  = new Map();   // 7TV paint id -> paint object
-let   cosmeticsLoaded = false;
+const paintFetching = new Map(); // paint id -> Promise (dedupe in-flight requests)
 let   roomId     = null;
 
-async function loadCosmeticsIndex() {
-  if (cosmeticsLoaded) return;
-  cosmeticsLoaded = true;
-  try {
-    const r = await fetch('https://7tv.io/v3/cosmetics');
-    const d = await r.json();
-    for (const p of (d.paints || [])) paintById.set(p.id, p);
-    console.log('[7TV cosmetics] loaded', paintById.size, 'paints');
-  } catch (e) {
-    console.warn('cosmetics index', e);
-    cosmeticsLoaded = false; // allow retry
-  }
+/**
+ * Fetch a single paint by ID using the 7TV GraphQL endpoint.
+ * Dedupes concurrent requests for the same paint.
+ */
+async function fetchPaintById(paintId) {
+  if (paintById.has(paintId)) return paintById.get(paintId);
+  if (paintFetching.has(paintId)) return paintFetching.get(paintId);
+
+  const p = (async () => {
+    try {
+      const r = await fetch('https://7tv.io/v3/gql', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          operationName: 'GetCosmetics',
+          variables: { list: [paintId] },
+          query: `query GetCosmetics($list: [ObjectID!]) {
+            cosmetics(list: $list) {
+              paints {
+                id kind name function color angle shape image_url repeat
+                stops { at color }
+                shadows { x_offset y_offset radius color }
+              }
+            }
+          }`,
+        }),
+      });
+      const d = await r.json();
+      const paint = d?.data?.cosmetics?.paints?.[0] || null;
+      if (paint) {
+        paintById.set(paintId, paint);
+        console.log('[7TV paint]', paint.name, paint);
+      }
+      return paint;
+    } catch (e) {
+      console.warn('fetchPaintById', paintId, e);
+      return null;
+    } finally {
+      paintFetching.delete(paintId);
+    }
+  })();
+
+  paintFetching.set(paintId, p);
+  return p;
 }
 
 /* ---------- 3b. Twitch badges (via ivr.fi proxy, no auth needed) ---------- */
 const badgeMap = new Map(); // "set_id/version" -> image_url
 
+function parseBadgeResponse(data) {
+  // ivr.fi may return: array of sets, OR {badges: [...]}, OR Twitch-style {badge_sets: {...}}
+  let sets;
+  if (Array.isArray(data)) sets = data;
+  else if (Array.isArray(data?.badges)) sets = data.badges;
+  else if (data?.badge_sets) {
+    // Twitch native shape: { badge_sets: { broadcaster: { versions: { "1": {image_url_*} } } } }
+    for (const setId in data.badge_sets) {
+      const versions = data.badge_sets[setId].versions || {};
+      for (const v in versions) {
+        const url = versions[v].image_url_4x || versions[v].image_url_2x || versions[v].image_url_1x;
+        if (url) badgeMap.set(`${setId}/${v}`, url);
+      }
+    }
+    return;
+  } else return;
+
+  for (const set of sets) {
+    const setId = set.set_id || set.setID || set.id;
+    if (!setId) continue;
+    for (const v of (set.versions || [])) {
+      const vId = v.id || v.version;
+      const url = v.image_url_4x || v.image_url_2x || v.image_url_1x || v.imageUrl4x || v.imageUrl2x;
+      if (vId && url) badgeMap.set(`${setId}/${vId}`, url);
+    }
+  }
+}
+
 async function loadBadges(twitchId) {
   // Global badges
   try {
     const r = await fetch('https://api.ivr.fi/v2/twitch/badges');
-    const sets = await r.json();
-    for (const set of sets) {
-      for (const v of set.versions) {
-        badgeMap.set(`${set.set_id}/${v.id}`, v.image_url_4x || v.image_url_2x || v.image_url_1x);
-      }
-    }
+    parseBadgeResponse(await r.json());
   } catch (e) { console.warn('badges global', e); }
 
   // Channel-specific badges (subscriber tiers, bits, etc)
-  if (!twitchId) return;
-  try {
-    const r = await fetch(`https://api.ivr.fi/v2/twitch/badges/${twitchId}`);
-    const sets = await r.json();
-    for (const set of sets) {
-      for (const v of set.versions) {
-        // Channel badges override globals
-        badgeMap.set(`${set.set_id}/${v.id}`, v.image_url_4x || v.image_url_2x || v.image_url_1x);
-      }
-    }
-  } catch (e) { console.warn('badges channel', e); }
+  if (twitchId) {
+    try {
+      const r = await fetch(`https://api.ivr.fi/v2/twitch/badges/${twitchId}`);
+      parseBadgeResponse(await r.json());
+    } catch (e) { console.warn('badges channel', e); }
+  }
+
+  console.log('[badges] loaded', badgeMap.size, 'badge versions');
 }
 
 /* ---------- 3. Load emotes from 7TV / BTTV / FFZ ---------- */
@@ -271,8 +323,7 @@ async function getPaint(twitchId) {
       // Paint may come inline (style.paint) or as an ID (style.paint_id)
       let paint = style.paint || null;
       if (!paint && style.paint_id) {
-        await loadCosmeticsIndex();
-        paint = paintById.get(style.paint_id) || null;
+        paint = await fetchPaintById(style.paint_id);
       }
       return { paint, color: style.color ?? null, userId: d.user?.id || null };
     } catch (err) {
@@ -296,14 +347,7 @@ async function getPaint(twitchId) {
 function paintToCSS(paint) {
   if (!paint) return null;
 
-  // Log raw paint object once per user (helps debug API format changes)
-  if (!paint._logged) {
-    console.log('[7TV paint]', JSON.parse(JSON.stringify(paint)));
-    paint._logged = true;
-  }
-
-  // 7TV API has used multiple field shapes over versions.
-  // Normalize: snake_case OR camelCase, function in any case.
+  // Normalize field names (snake_case OR camelCase)
   const fn       = String(paint.function || paint.type || '').toUpperCase();
   const angle    = paint.angle ?? 0;
   const shape    = paint.shape || 'circle';
@@ -311,22 +355,31 @@ function paintToCSS(paint) {
   const stops    = paint.stops || paint.color_stops || [];
   const shadows  = paint.shadows || paint.drop_shadows || [];
 
+  // 7TV color int = signed 32-bit 0xRRGGBBAA
   const int2rgba = n => {
     if (n == null) return 'rgba(255,255,255,1)';
-    // 7TV color int = 0xRRGGBBAA
-    const r = (n >>> 24) & 0xff;
-    const g = (n >>> 16) & 0xff;
-    const b = (n >>> 8)  & 0xff;
-    const a = (n & 0xff) / 255;
+    const u = (n >>> 0); // normalize to unsigned
+    const r = (u >>> 24) & 0xff;
+    const g = (u >>> 16) & 0xff;
+    const b = (u >>> 8)  & 0xff;
+    const a = (u & 0xff) / 255;
     return `rgba(${r},${g},${b},${a})`;
   };
 
-  const stopsCSS = stops
-    .map(s => `${int2rgba(s.color)} ${((s.at ?? 0) * 100).toFixed(2)}%`)
-    .join(', ');
+  // Stops are distributed evenly across 0..100% by index (this is how the
+  // 7TV web extension renders them — the `at` field is ignored in practice).
+  let stopsCSS = '';
+  if (stops.length === 1) {
+    const c = int2rgba(stops[0].color);
+    stopsCSS = `${c} 0%, ${c} 100%`;
+  } else if (stops.length > 1) {
+    stopsCSS = stops.map((s, i) =>
+      `${int2rgba(s.color)} ${(100 / (stops.length - 1) * i).toFixed(2)}%`
+    ).join(', ');
+  }
 
   let bg = null;
-  if (fn.includes('LINEAR') && stopsCSS) {
+  if ((fn.includes('LINEAR') || (!fn && stops.length)) && stopsCSS) {
     bg = `linear-gradient(${angle}deg, ${stopsCSS})`;
   } else if (fn.includes('RADIAL') && stopsCSS) {
     bg = `radial-gradient(${shape}, ${stopsCSS})`;
@@ -334,7 +387,7 @@ function paintToCSS(paint) {
     bg = `url("${imageUrl}")`;
   }
 
-  // Build drop-shadow filter chain (paint shadows = glow/outline on text)
+  // CSS drop-shadow: offset-x | offset-y | blur-radius | color
   let filter = null;
   if (Array.isArray(shadows) && shadows.length) {
     filter = shadows.map(s => {
