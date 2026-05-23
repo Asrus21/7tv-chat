@@ -544,10 +544,19 @@ async function applyPaint(nickEl, twitchId) {
     return;
   }
 
+  // Pre-load URL paints to verify they're accessible
+  const urlMatch = css.bg.match(/url\("([^"]+)"\)/);
+  if (urlMatch) {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => console.log('[paint image loaded]', urlMatch[1], img.naturalWidth + 'x' + img.naturalHeight);
+    img.onerror = (e) => console.error('[paint image FAILED to load]', urlMatch[1]);
+    img.src = urlMatch[1];
+  }
+
   nickEl.classList.add('paint');
 
   // CRITICAL: background-clip:text requires explicit dimensions
-  // Must be display:inline-block or block, not inline
   nickEl.style.display = 'inline-block';
   nickEl.style.whiteSpace = 'nowrap';
 
@@ -565,7 +574,6 @@ async function applyPaint(nickEl, twitchId) {
     const isUrl = css.bg.includes('url(');
     if (isUrl) {
       // For animated webp paints: let the image keep its natural size and tile/center it
-      // This is how the 7TV extension renders animated paints
       nickEl.style.backgroundSize = 'auto';
       nickEl.style.backgroundRepeat = 'repeat';
       nickEl.style.backgroundPosition = 'center';
@@ -575,6 +583,16 @@ async function applyPaint(nickEl, twitchId) {
       nickEl.style.backgroundRepeat = 'no-repeat';
       nickEl.style.backgroundPosition = '0 0';
     }
+    // Log final computed style for debugging
+    const cs = getComputedStyle(nickEl);
+    console.log('[final style]', data.paint?.name, {
+      backgroundImage: cs.backgroundImage.substring(0, 80),
+      backgroundClip: cs.backgroundClip || cs.webkitBackgroundClip,
+      color: cs.color,
+      webkitTextFillColor: cs.webkitTextFillColor,
+      display: cs.display,
+      width: nickEl.offsetWidth + 'px',
+    });
   });
 }
 
