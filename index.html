@@ -134,34 +134,48 @@ if (!CHANNEL) {
 /* ---------- 2. Emote + Paint caches ---------- */
 const emoteMap   = new Map();   // code -> {url, zeroWidth}
 const paintCache = new Map();   // twitchId -> {paint, color} | null
+const paintById  = new Map();   // 7TV paint id -> paint object
+let   cosmeticsLoaded = false;
 let   roomId     = null;
 
-/* ---------- 3b. Twitch badges (global + channel) ---------- */
+async function loadCosmeticsIndex() {
+  if (cosmeticsLoaded) return;
+  cosmeticsLoaded = true;
+  try {
+    const r = await fetch('https://7tv.io/v3/cosmetics');
+    const d = await r.json();
+    for (const p of (d.paints || [])) paintById.set(p.id, p);
+    console.log('[7TV cosmetics] loaded', paintById.size, 'paints');
+  } catch (e) {
+    console.warn('cosmetics index', e);
+    cosmeticsLoaded = false; // allow retry
+  }
+}
+
+/* ---------- 3b. Twitch badges (via ivr.fi proxy, no auth needed) ---------- */
 const badgeMap = new Map(); // "set_id/version" -> image_url
 
 async function loadBadges(twitchId) {
   // Global badges
   try {
-    const r = await fetch('https://badges.twitch.tv/v1/badges/global/display');
-    const d = await r.json();
-    for (const setId in d.badge_sets) {
-      const versions = d.badge_sets[setId].versions;
-      for (const v in versions) {
-        badgeMap.set(`${setId}/${v}`, versions[v].image_url_2x || versions[v].image_url_1x);
+    const r = await fetch('https://api.ivr.fi/v2/twitch/badges');
+    const sets = await r.json();
+    for (const set of sets) {
+      for (const v of set.versions) {
+        badgeMap.set(`${set.set_id}/${v.id}`, v.image_url_4x || v.image_url_2x || v.image_url_1x);
       }
     }
   } catch (e) { console.warn('badges global', e); }
 
-  // Channel-specific badges (subscriber tiers etc)
+  // Channel-specific badges (subscriber tiers, bits, etc)
   if (!twitchId) return;
   try {
-    const r = await fetch(`https://badges.twitch.tv/v1/badges/channels/${twitchId}/display`);
-    const d = await r.json();
-    for (const setId in d.badge_sets) {
-      const versions = d.badge_sets[setId].versions;
-      for (const v in versions) {
+    const r = await fetch(`https://api.ivr.fi/v2/twitch/badges/${twitchId}`);
+    const sets = await r.json();
+    for (const set of sets) {
+      for (const v of set.versions) {
         // Channel badges override globals
-        badgeMap.set(`${setId}/${v}`, versions[v].image_url_2x || versions[v].image_url_1x);
+        badgeMap.set(`${set.set_id}/${v.id}`, v.image_url_4x || v.image_url_2x || v.image_url_1x);
       }
     }
   } catch (e) { console.warn('badges channel', e); }
@@ -254,16 +268,15 @@ async function getPaint(twitchId) {
       const style = d.user?.style;
       if (!style) return null;
 
-      // Resolve paint object if only ID is given
+      // Paint may come inline (style.paint) or as an ID (style.paint_id)
       let paint = style.paint || null;
       if (!paint && style.paint_id) {
-        try {
-          const pr = await fetch(`https://7tv.io/v3/cosmetics?user_identifier=twitch_id`);
-          // (fallback unused — most responses already inline `style.paint`)
-        } catch {}
+        await loadCosmeticsIndex();
+        paint = paintById.get(style.paint_id) || null;
       }
-      return { paint, color: style.color || null, userId: d.user?.id || null };
-    } catch {
+      return { paint, color: style.color ?? null, userId: d.user?.id || null };
+    } catch (err) {
+      console.warn('getPaint', err);
       return null;
     }
   })();
@@ -442,10 +455,13 @@ async function applyPaint(nickEl, twitchId) {
 }
 
 function int2rgbaSolid(n) {
-  const r = (n >>> 24) & 0xff;
-  const g = (n >>> 16) & 0xff;
-  const b = (n >>> 8)  & 0xff;
-  return `rgb(${r},${g},${b})`;
+  // 7TV color is signed 32-bit int 0xRRGGBBAA; normalize to unsigned
+  const u = n >>> 0;
+  const r = (u >>> 24) & 0xff;
+  const g = (u >>> 16) & 0xff;
+  const b = (u >>> 8)  & 0xff;
+  const a = (u & 0xff) / 255;
+  return `rgba(${r},${g},${b},${a})`;
 }
 
 function stringColor(s) {
