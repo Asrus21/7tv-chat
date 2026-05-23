@@ -73,7 +73,12 @@
     margin-right: 4px;
     vertical-align: middle;
   }
-  .badges img { height: 1em; width: 1em; vertical-align: middle; }
+  .badges img {
+    height: 1.1em;
+    width: 1.1em;
+    vertical-align: middle;
+    margin-top: -0.15em;
+  }
 
   .emote {
     height: 1.7em;
@@ -130,6 +135,37 @@ if (!CHANNEL) {
 const emoteMap   = new Map();   // code -> {url, zeroWidth}
 const paintCache = new Map();   // twitchId -> {paint, color} | null
 let   roomId     = null;
+
+/* ---------- 3b. Twitch badges (global + channel) ---------- */
+const badgeMap = new Map(); // "set_id/version" -> image_url
+
+async function loadBadges(twitchId) {
+  // Global badges
+  try {
+    const r = await fetch('https://badges.twitch.tv/v1/badges/global/display');
+    const d = await r.json();
+    for (const setId in d.badge_sets) {
+      const versions = d.badge_sets[setId].versions;
+      for (const v in versions) {
+        badgeMap.set(`${setId}/${v}`, versions[v].image_url_2x || versions[v].image_url_1x);
+      }
+    }
+  } catch (e) { console.warn('badges global', e); }
+
+  // Channel-specific badges (subscriber tiers etc)
+  if (!twitchId) return;
+  try {
+    const r = await fetch(`https://badges.twitch.tv/v1/badges/channels/${twitchId}/display`);
+    const d = await r.json();
+    for (const setId in d.badge_sets) {
+      const versions = d.badge_sets[setId].versions;
+      for (const v in versions) {
+        // Channel badges override globals
+        badgeMap.set(`${setId}/${v}`, versions[v].image_url_2x || versions[v].image_url_1x);
+      }
+    }
+  } catch (e) { console.warn('badges channel', e); }
+}
 
 /* ---------- 3. Load emotes from 7TV / BTTV / FFZ ---------- */
 async function loadGlobalEmotes() {
@@ -214,6 +250,7 @@ async function getPaint(twitchId) {
       const r = await fetch(`https://7tv.io/v3/users/twitch/${twitchId}`);
       if (!r.ok) return null;
       const d = await r.json();
+      console.log('[7TV user]', twitchId, d.user?.username, 'style:', d.user?.style);
       const style = d.user?.style;
       if (!style) return null;
 
@@ -246,10 +283,20 @@ async function getPaint(twitchId) {
 function paintToCSS(paint) {
   if (!paint) return null;
 
-  // paint.function: LINEAR_GRADIENT | RADIAL_GRADIENT | URL
-  // paint.stops: [{at:0..1, color: int (0xRRGGBBAA)}]
-  // paint.shadows: [{x_offset, y_offset, radius, color}]
-  // paint.angle, paint.repeat, paint.shape, paint.image_url
+  // Log raw paint object once per user (helps debug API format changes)
+  if (!paint._logged) {
+    console.log('[7TV paint]', JSON.parse(JSON.stringify(paint)));
+    paint._logged = true;
+  }
+
+  // 7TV API has used multiple field shapes over versions.
+  // Normalize: snake_case OR camelCase, function in any case.
+  const fn       = String(paint.function || paint.type || '').toUpperCase();
+  const angle    = paint.angle ?? 0;
+  const shape    = paint.shape || 'circle';
+  const imageUrl = paint.image_url || paint.imageUrl || paint.url || null;
+  const stops    = paint.stops || paint.color_stops || [];
+  const shadows  = paint.shadows || paint.drop_shadows || [];
 
   const int2rgba = n => {
     if (n == null) return 'rgba(255,255,255,1)';
@@ -261,29 +308,28 @@ function paintToCSS(paint) {
     return `rgba(${r},${g},${b},${a})`;
   };
 
-  let bg = null;
-  const stops = (paint.stops || [])
-    .map(s => `${int2rgba(s.color)} ${(s.at * 100).toFixed(2)}%`)
+  const stopsCSS = stops
+    .map(s => `${int2rgba(s.color)} ${((s.at ?? 0) * 100).toFixed(2)}%`)
     .join(', ');
 
-  switch (paint.function) {
-    case 'LINEAR_GRADIENT':
-      bg = `linear-gradient(${paint.angle ?? 0}deg, ${stops})`;
-      break;
-    case 'RADIAL_GRADIENT':
-      bg = `radial-gradient(${paint.shape || 'circle'}, ${stops})`;
-      break;
-    case 'URL':
-      if (paint.image_url) bg = `url("${paint.image_url}")`;
-      break;
+  let bg = null;
+  if (fn.includes('LINEAR') && stopsCSS) {
+    bg = `linear-gradient(${angle}deg, ${stopsCSS})`;
+  } else if (fn.includes('RADIAL') && stopsCSS) {
+    bg = `radial-gradient(${shape}, ${stopsCSS})`;
+  } else if ((fn.includes('URL') || fn.includes('IMAGE')) && imageUrl) {
+    bg = `url("${imageUrl}")`;
   }
 
   // Build drop-shadow filter chain (paint shadows = glow/outline on text)
   let filter = null;
-  if (Array.isArray(paint.shadows) && paint.shadows.length) {
-    filter = paint.shadows.map(s =>
-      `drop-shadow(${s.x_offset || 0}px ${s.y_offset || 0}px ${s.radius || 0}px ${int2rgba(s.color)})`
-    ).join(' ');
+  if (Array.isArray(shadows) && shadows.length) {
+    filter = shadows.map(s => {
+      const x = s.x_offset ?? s.xOffset ?? 0;
+      const y = s.y_offset ?? s.yOffset ?? 0;
+      const r = s.radius ?? 0;
+      return `drop-shadow(${x}px ${y}px ${r}px ${int2rgba(s.color)})`;
+    }).join(' ');
   }
 
   return { bg, filter };
@@ -300,12 +346,14 @@ function escapeHtml(s) {
 
 function buildBadges(badges) {
   if (!badges) return '';
-  // tmi.js gives badge names like { broadcaster:'1', subscriber:'12', moderator:'1' }
-  // We only show simple text indicators since rendering global badges needs Helix auth.
-  const map = { broadcaster: '🎙', moderator: '🛡', vip: '💎', subscriber: '★', founder: '✦', staff: '⚙' };
-  const out = [];
-  for (const k in badges) if (map[k]) out.push(map[k]);
-  return out.length ? `<span class="badges">${out.join('')}</span>` : '';
+  // tmi.js delivers badges as { broadcaster: '1', subscriber: '12', moderator: '1', ... }
+  const imgs = [];
+  for (const setId in badges) {
+    const version = badges[setId];
+    const url = badgeMap.get(`${setId}/${version}`);
+    if (url) imgs.push(`<img src="${url}" alt="${setId}">`);
+  }
+  return imgs.length ? `<span class="badges">${imgs.join('')}</span>` : '';
 }
 
 function emotesInMessage(text, tmiEmotes) {
@@ -505,6 +553,9 @@ connectEvents();
       await loadChannelEmotes(roomId);
     }
   } catch (e) { console.warn('id lookup', e); }
+
+  // Load Twitch badges (global + channel)
+  await loadBadges(roomId);
 
   const client = new tmi.Client({
     options: { skipUpdatingEmotesets: true },
