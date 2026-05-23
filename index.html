@@ -94,14 +94,20 @@
      drop-shadow stack pra glow/outline.
      ============================================================ */
   .paint {
-    background-color: currentColor;
+    display: inline-block;
     background-image: var(--paint-bg, none);
-    background-size: cover;
+    background-size: 100% 100%;
+    background-repeat: no-repeat;
     background-clip: text;
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     color: transparent;
     filter: var(--paint-shadow, none);
+  }
+  /* Make sure ::after (the colon) doesn't inherit the transparent fill */
+  .nick.paint::after {
+    -webkit-text-fill-color: #fff;
+    color: #fff;
   }
 </style>
 </head>
@@ -367,6 +373,12 @@ async function getPaint(twitchId) {
 function paintToCSS(paint) {
   if (!paint) return null;
 
+  // Log full structure once per paint
+  if (!paint._loggedFull) {
+    console.log('[paintToCSS] full paint object:', JSON.stringify(paint, null, 2));
+    paint._loggedFull = true;
+  }
+
   // Normalize field names (snake_case OR camelCase)
   const fn       = String(paint.function || paint.type || '').toUpperCase();
   const angle    = paint.angle ?? 0;
@@ -434,10 +446,19 @@ function buildBadges(badges) {
   if (!badges) return '';
   // tmi.js delivers badges as { broadcaster: '1', subscriber: '12', moderator: '1', ... }
   const imgs = [];
+  const emojiFallback = {
+    broadcaster: '🎙', moderator: '🛡', vip: '💎', subscriber: '★',
+    founder: '✦', staff: '⚙', partner: '✓', turbo: '⚡', premium: '◆',
+    bits: '◇', glhf_pledge: '♡',
+  };
   for (const setId in badges) {
     const version = badges[setId];
     const url = badgeMap.get(`${setId}/${version}`);
-    if (url) imgs.push(`<img src="${url}" alt="${setId}">`);
+    if (url) {
+      imgs.push(`<img src="${url}" alt="${setId}">`);
+    } else if (emojiFallback[setId]) {
+      imgs.push(`<span class="badge-fallback">${emojiFallback[setId]}</span>`);
+    }
   }
   return imgs.length ? `<span class="badges">${imgs.join('')}</span>` : '';
 }
@@ -528,7 +549,11 @@ async function applyPaint(nickEl, twitchId) {
   }
 
   const css = paintToCSS(data.paint);
-  if (!css || !css.bg) return;
+  console.log('[applyPaint]', data.paint?.name, '→', css);
+  if (!css || !css.bg) {
+    console.warn('[applyPaint] no bg generated for', data.paint?.name, 'paint:', data.paint);
+    return;
+  }
 
   // Inline color="..." set in addMessage() would beat the .paint class via specificity.
   // Clear it so background-clip:text can render.
